@@ -43,8 +43,8 @@
 //!     apply_correction(correction);
 //!     thread::sleep(Duration::from_secs(1));
 //! }
-//! # fn measure() -> f64 { todo!() }
-//! # fn apply_correction(_: f64) { todo!() }
+//! # fn measure() -> f32 { todo!() }
+//! # fn apply_correction(_: f32) { todo!() }
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -52,6 +52,7 @@
 #![deny(missing_debug_implementations, nonstandard_style)]
 #![warn(missing_docs, future_incompatible, unreachable_pub, rust_2018_idioms)]
 
+use core::option::Option;
 use core::time::Duration;
 #[cfg(feature = "std")]
 use std::time::Instant;
@@ -77,21 +78,23 @@ use std::time::Instant;
 ///     apply_correction(correction);
 ///     thread::sleep(Duration::from_secs(1));
 /// }
-/// # fn measure() -> f64 { todo!() }
-/// # fn apply_correction(_: f64) { todo!() }
+/// # fn measure() -> f32 { todo!() }
+/// # fn apply_correction(_: f32) { todo!() }
 /// ```
 
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Controller {
-    target: f64,
+    target: f32,
 
-    proportional_gain: f64,
-    integral_gain: f64,
-    derivative_gain: f64,
+    proportional_gain: f32,
+    integral_gain: f32,
+    derivative_gain: f32,
 
-    error_sum: f64,
-    last_error: f64,
+    error_sum: f32,
+    error_sum_limit_low: Option<f32>,
+    error_sum_limit_high: Option<f32>,
+    last_error: f32,
     #[cfg(feature = "std")]
     last_instant: Option<Instant>,
 }
@@ -109,10 +112,10 @@ impl Controller {
     /// let mut controller = Controller::new(target, 0.20, 0.02, 0.04);
     /// ```
     pub const fn new(
-        target: f64,
-        proportional_gain: f64,
-        integral_gain: f64,
-        derivative_gain: f64,
+        target: f32,
+        proportional_gain: f32,
+        integral_gain: f32,
+        derivative_gain: f32,
     ) -> Self {
         Self {
             target,
@@ -120,6 +123,8 @@ impl Controller {
             integral_gain,
             derivative_gain,
             error_sum: 0.0,
+            error_sum_limit_high: None,
+            error_sum_limit_low: None,
             last_error: 0.0,
             #[cfg(feature = "std")]
             last_instant: None,
@@ -138,7 +143,7 @@ impl Controller {
     /// let mut controller = Controller::new(target, 0.20, 0.02, 0.04);
     /// assert_eq!(controller.target(), 80.0);
     /// ```
-    pub const fn target(&self) -> f64 {
+    pub const fn target(&self) -> f32 {
         self.target
     }
 
@@ -155,23 +160,28 @@ impl Controller {
     /// controller.set_target(60.0);
     /// assert_eq!(controller.target(), 60.0);
     /// ```
-    pub fn set_target(&mut self, target: f64) {
+    pub fn set_target(&mut self, target: f32) {
         self.target = target;
     }
 
     /// Set the proportional gain
-    pub fn set_proportional_gain(&mut self, proportional_gain: f64) {
+    pub fn set_proportional_gain(&mut self, proportional_gain: f32) {
         self.proportional_gain = proportional_gain;
     }
 
     /// Set the integral gain
-    pub fn set_integral_gain(&mut self, integral_gain: f64) {
+    pub fn set_integral_gain(&mut self, integral_gain: f32) {
         self.integral_gain = integral_gain;
     }
 
     /// Set the derivative gain
-    pub fn set_derivative_gain(&mut self, derivative_gain: f64) {
+    pub fn set_derivative_gain(&mut self, derivative_gain: f32) {
         self.derivative_gain = derivative_gain;
+    }
+
+    pub fn set_error_sum_limits(&mut self, low: Option<f32>, high: Option<f32>) {
+        self.error_sum_limit_low = low;
+        self.error_sum_limit_high = high;
     }
 
     /// Push an entry into the controller.
@@ -190,11 +200,11 @@ impl Controller {
     /// # Panics
     ///
     /// This function may panic if the `time_delta` in millis no longer fits in
-    /// an `f64`. This limit can be encountered when the PID controller is updated on the scale of
+    /// an `f32`. This limit can be encountered when the PID controller is updated on the scale of
     /// hours, rather than on the scale of minutes to milliseconds.
     #[cfg(feature = "std")]
     #[must_use = "A PID controller does nothing if the correction is not applied"]
-    pub fn update(&mut self, current_value: f64) -> f64 {
+    pub fn update(&mut self, current_value: f32) -> f32 {
         let now = Instant::now();
         let elapsed = match self.last_instant {
             Some(last_time) => now.duration_since(last_time),
@@ -225,16 +235,24 @@ impl Controller {
     /// # Panics
     ///
     /// This function may panic if the `time_delta` in millis no longer fits in
-    /// an `f64`. This limit can be encountered when the PID controller is updated on the scale of
+    /// an `f32`. This limit can be encountered when the PID controller is updated on the scale of
     /// hours, rather than on the scale of minutes to milliseconds.
     #[must_use = "A PID controller does nothing if the correction is not applied"]
-    pub fn update_elapsed(&mut self, current_value: f64, elapsed: Duration) -> f64 {
-        let elapsed = (elapsed.as_millis() as f64).max(1.0);
+    pub fn update_elapsed(&mut self, current_value: f32, elapsed: Duration) -> f32 {
+        let elapsed = (elapsed.as_millis() as f32).max(1.0);
 
         let error = self.target - current_value;
         let error_delta = (error - self.last_error) / elapsed;
         self.error_sum += error * elapsed;
         self.last_error = error;
+
+        if let Some(sum_limit_low) = self.error_sum_limit_low {
+            self.error_sum = self.error_sum.max(sum_limit_low);
+        }
+
+        if let Some(sum_limit_high) = self.error_sum_limit_high {
+            self.error_sum = self.error_sum.min(sum_limit_high);
+        }
 
         let p = self.proportional_gain * error;
         let i = self.integral_gain * self.error_sum;
